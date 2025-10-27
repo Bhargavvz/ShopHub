@@ -4,11 +4,12 @@ import { useForm } from 'react-hook-form';
 import { useCart } from '../context/CartContext';
 import { useAuth } from '../context/AuthContext';
 import { orderService } from '../services/orderService';
+import { razorpayService } from '../services/razorpayService';
 import { ShippingAddress } from '../types';
 import { Input } from '../components/common/Input';
 import { Button } from '../components/common/Button';
 import { ErrorMessage } from '../components/common/ErrorMessage';
-import { Lock } from 'lucide-react';
+import { Lock, CreditCard } from 'lucide-react';
 
 export function Checkout() {
   const navigate = useNavigate();
@@ -16,6 +17,7 @@ export function Checkout() {
   const { user } = useAuth();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [processingPayment, setProcessingPayment] = useState(false);
 
   const {
     register,
@@ -28,12 +30,16 @@ export function Checkout() {
   const total = subtotal + tax;
 
   const onSubmit = async (data: ShippingAddress) => {
-    if (!user) return;
+    if (!user) {
+      setError('Please login to continue');
+      return;
+    }
 
     try {
       setLoading(true);
       setError('');
 
+      // Prepare order items
       const orderItems = items.map(item => ({
         product_id: item.product_id,
         product_name: item.product?.name || '',
@@ -42,6 +48,7 @@ export function Checkout() {
         price: item.product?.price || 0,
       }));
 
+      // Create order in database
       const order = await orderService.createOrder(
         user.id,
         orderItems,
@@ -49,12 +56,111 @@ export function Checkout() {
         data
       );
 
-      await clearCart();
-      navigate(`/order-success/${order.id}`);
+      // Initiate Razorpay payment
+      await initiateRazorpayPayment(order.id, data);
     } catch (err: any) {
+      console.error('Checkout error:', err);
       setError(err.message || 'Failed to place order. Please try again.');
+      setLoading(false);
+    }
+  };
+
+  const initiateRazorpayPayment = async (orderId: string, shippingAddress: ShippingAddress) => {
+    try {
+      setProcessingPayment(true);
+      
+      const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID;
+      
+      if (!razorpayKeyId) {
+        throw new Error('Razorpay configuration is missing. Please contact support.');
+      }
+
+      // Create Razorpay order
+      const razorpayOrder = await razorpayService.createRazorpayOrder(
+        total,
+        'INR',
+        orderId
+      );
+
+      // Configure Razorpay checkout options
+      const options = {
+        amount: razorpayOrder.amount,
+        currency: razorpayOrder.currency,
+        name: 'ShopHub',
+        description: `Order #${orderId.substring(0, 8)}`,
+        order_id: razorpayOrder.id,
+        handler: async (response: any) => {
+          await handlePaymentSuccess(orderId, response);
+        },
+        prefill: {
+          name: shippingAddress.full_name,
+          email: user?.email || '',
+          contact: shippingAddress.phone,
+        },
+        theme: {
+          color: '#2563eb', // Blue color to match your theme
+        },
+        modal: {
+          ondismiss: () => {
+            setLoading(false);
+            setProcessingPayment(false);
+            setError('Payment cancelled. Your order has been saved and you can complete payment later.');
+          },
+        },
+      };
+
+      // Display Razorpay checkout
+      await razorpayService.displayRazorpayCheckout(options, razorpayKeyId);
+    } catch (err: any) {
+      console.error('Razorpay error:', err);
+      
+      // Provide more detailed error messages
+      let userMessage = err.message || 'Failed to initiate payment. Please try again.';
+      
+      // Format multi-line error messages for display
+      if (userMessage.includes('\n')) {
+        // Convert to HTML breaks for display
+        userMessage = userMessage.split('\n').join(' ');
+      }
+      
+      setError(userMessage);
+      setLoading(false);
+      setProcessingPayment(false);
+    }
+  };
+
+  const handlePaymentSuccess = async (orderId: string, paymentResponse: any) => {
+    try {
+      // Verify payment signature
+      const isValid = await razorpayService.verifyPayment({
+        razorpay_order_id: paymentResponse.razorpay_order_id,
+        razorpay_payment_id: paymentResponse.razorpay_payment_id,
+        razorpay_signature: paymentResponse.razorpay_signature,
+      });
+
+      if (!isValid) {
+        throw new Error('Payment verification failed. Please contact support.');
+      }
+
+      // Update order with payment details
+      await razorpayService.updateOrderPayment(orderId, {
+        razorpay_order_id: paymentResponse.razorpay_order_id,
+        razorpay_payment_id: paymentResponse.razorpay_payment_id,
+        razorpay_signature: paymentResponse.razorpay_signature,
+        payment_status: 'paid',
+      });
+
+      // Clear cart
+      await clearCart();
+
+      // Redirect to success page
+      navigate(`/order-success/${orderId}`);
+    } catch (err: any) {
+      console.error('Payment verification error:', err);
+      setError(err.message || 'Payment completed but verification failed. Please contact support.');
     } finally {
       setLoading(false);
+      setProcessingPayment(false);
     }
   };
 
@@ -146,10 +252,29 @@ export function Checkout() {
                   })}
                 />
 
-                <Button type="submit" loading={loading} className="w-full">
-                  <Lock className="w-4 h-4" />
-                  Place Order
+                <Button 
+                  type="submit" 
+                  loading={loading || processingPayment} 
+                  className="w-full"
+                  disabled={loading || processingPayment}
+                >
+                  {processingPayment ? (
+                    <>
+                      <CreditCard className="w-4 h-4" />
+                      Processing Payment...
+                    </>
+                  ) : (
+                    <>
+                      <Lock className="w-4 h-4" />
+                      Proceed to Payment
+                    </>
+                  )}
                 </Button>
+
+                <p className="text-xs text-center text-gray-500 mt-2">
+                  <Lock className="w-3 h-3 inline mr-1" />
+                  Secure payment powered by Razorpay
+                </p>
               </form>
             </div>
           </div>

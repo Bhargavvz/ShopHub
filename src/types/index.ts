@@ -43,6 +43,11 @@ export interface Order {
   user_id: string;
   total_amount: number;
   status: 'pending' | 'processing' | 'shipped' | 'delivered' | 'cancelled';
+  payment_status?: 'pending' | 'paid' | 'failed';
+  payment_id?: string;
+  razorpay_order_id?: string;
+  razorpay_payment_id?: string;
+  razorpay_signature?: string;
   shipping_address: ShippingAddress;
   created_at: string;
   updated_at: string;
